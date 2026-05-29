@@ -99,10 +99,26 @@ button {
   line-height: 1.5;
 }
 
-.google-button {
+.login-card .google-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   width: 100%;
   margin-top: 10px;
   padding: 0 22px;
+  background: #fff;
+  color: var(--green-dark);
+  border: 1.5px solid var(--green);
+}
+
+.login-card .google-button:hover {
+  background: #f3faf6;
+  border-color: var(--green-dark);
+}
+
+.google-icon {
+  flex-shrink: 0;
 }
 
 .brand-row {
