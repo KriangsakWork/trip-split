@@ -34,6 +34,12 @@ let session = loadSession();
 const app = document.querySelector("#app");
 
 let activeChannel = null;
+// The signed-in Google user (null when logged out).
+let currentUser = null;
+
+function defaultName() {
+  return currentUser?.user_metadata?.full_name || currentUser?.user_metadata?.name || "";
+}
 
 function loadSession() {
   const saved = localStorage.getItem(SESSION_KEY);
@@ -132,7 +138,32 @@ function onTripChange(code, payload) {
   renderDashboard(store.trips[code]);
 }
 
+function renderLogin() {
+  watchTrip(null);
+  app.className = "app-shell auth-shell";
+  app.innerHTML = `
+    <section class="auth-card">
+      <img class="form-art" src="assets/logo.png" alt="" />
+      <h1>Trip Split</h1>
+      <p class="muted">เข้าสู่ระบบเพื่อสร้างและแชร์ทริปข้ามอุปกรณ์</p>
+      <button class="primary-button" id="googleLogin" type="button">เข้าสู่ระบบด้วย Google</button>
+    </section>
+  `;
+
+  document.querySelector("#googleLogin").addEventListener("click", async () => {
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: location.origin + location.pathname + location.search },
+    });
+    if (error) showToast("เข้าสู่ระบบไม่สำเร็จ");
+  });
+}
+
 async function route() {
+  if (!currentUser) {
+    renderLogin();
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const tripCode = normalizeCode(params.get("trip") || "");
   if (tripCode) await fetchTrip(tripCode);
@@ -175,6 +206,7 @@ async function renderStart() {
           <h1>Trip Split</h1>
           <p>สร้างทริป แชร์ลิงก์ให้น้อง แล้วช่วยกันลงค่าใช้จ่าย</p>
         </div>
+        <button class="secondary-button" id="logoutButton" type="button">ออกจากระบบ</button>
       </div>
       <div class="choice-grid">
         <button class="choice-card" id="showCreate" type="button">
@@ -220,6 +252,7 @@ async function renderStart() {
 
   document.querySelector("#showCreate").addEventListener("click", renderCreateTrip);
   document.querySelector("#showJoin").addEventListener("click", renderJoinByCode);
+  document.querySelector("#logoutButton").addEventListener("click", () => sb.auth.signOut());
   document.querySelectorAll("[data-open-trip]").forEach((button) => {
     button.addEventListener("click", () => openTrip(button.dataset.openTrip));
   });
@@ -251,7 +284,7 @@ function renderCreateTrip() {
           </label>
         </div>
         <label>ชื่อเล่นของคุณ
-          <input id="ownerName" type="text" placeholder="เช่น กอล์ฟ" autocomplete="off" required />
+          <input id="ownerName" type="text" placeholder="เช่น กอล์ฟ" autocomplete="off" value="${escapeHtml(defaultName())}" required />
         </label>
         <button class="primary-button" type="submit">สร้างทริป</button>
       </form>
@@ -328,7 +361,7 @@ function renderJoin(trip) {
       <h1>${escapeHtml(trip.name)}</h1>
       <form id="joinForm" class="stack-form">
         <label>ชื่อเล่น
-          <input id="joinName" type="text" placeholder="เช่น น้อง" autocomplete="off" required />
+          <input id="joinName" type="text" placeholder="เช่น น้อง" autocomplete="off" value="${escapeHtml(defaultName())}" required />
         </label>
         <button class="primary-button" type="submit">เข้าร่วมทริป</button>
       </form>
@@ -1155,4 +1188,14 @@ function escapeHtml(value) {
 }
 
 window.addEventListener("popstate", route);
-route();
+
+// Auth drives the first render: INITIAL_SESSION fires on load, SIGNED_IN after the
+// Google redirect, and SIGNED_OUT when logging out.
+sb.auth.onAuthStateChange((event, sessionData) => {
+  currentUser = sessionData?.user || null;
+  if (currentUser) {
+    route();
+  } else {
+    renderLogin();
+  }
+});
