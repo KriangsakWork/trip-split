@@ -72,6 +72,39 @@ button {
   text-align: center;
 }
 
+.login-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 40px 30px;
+}
+
+.login-art {
+  width: 180px;
+  height: 150px;
+  object-fit: contain;
+  margin-bottom: 4px;
+}
+
+.login-title {
+  font-size: 38px;
+  line-height: 1.1;
+  color: #ff9736;
+}
+
+.login-card .muted {
+  max-width: 280px;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.google-button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 0 22px;
+}
+
 .brand-row {
   display: flex;
   gap: 16px;

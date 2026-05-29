@@ -142,11 +142,11 @@ function renderLogin() {
   watchTrip(null);
   app.className = "app-shell auth-shell";
   app.innerHTML = `
-    <section class="auth-card">
-      <img class="form-art" src="assets/logo.png" alt="" />
-      <h1>Trip Split</h1>
+    <section class="auth-card login-card">
+      <img class="login-art" src="assets/logo.png" alt="" />
+      <h1 class="login-title">Trip Split</h1>
       <p class="muted">เข้าสู่ระบบเพื่อสร้างและแชร์ทริปข้ามอุปกรณ์</p>
-      <button class="primary-button" id="googleLogin" type="button">เข้าสู่ระบบด้วย Google</button>
+      <button class="primary-button google-button" id="googleLogin" type="button">เข้าสู่ระบบด้วย Google</button>
     </section>
   `;
 
