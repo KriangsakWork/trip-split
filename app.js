@@ -1,4 +1,3 @@
-const STORAGE_KEY = "trip-split-trips-v2";
 const SESSION_KEY = "trip-split-session-v2";
 
 const categoryList = ["ที่พัก", "เดินทาง", "อาหาร", "กิจกรรม", "อื่นๆ"];
@@ -21,24 +20,20 @@ const categoryColors = {
   "อื่นๆ": "#a7b1b5",
 };
 
-let store = loadStore();
+const SUPABASE_URL = "https://fqitbwbpniribbhbgfbb.supabase.co";
+// Publishable key — safe to ship in client code (maps to the anon role, guarded by RLS).
+const SUPABASE_KEY = "sb_publishable_SqQVH0oBwuEr0CGk22kUng_wdVFtNt4";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Trips live in the cloud so every device sees the same data. `store` is just an
+// in-memory cache of trips loaded from Supabase, keyed by code. Only this device's
+// identity/tokens stay in localStorage via `session`.
+let store = { trips: {} };
 let session = loadSession();
 
 const app = document.querySelector("#app");
 
-function loadStore() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (!saved) return { trips: {} };
-
-  try {
-    const parsed = JSON.parse(saved);
-    if (!parsed.trips) return { trips: {} };
-    Object.values(parsed.trips).forEach(normalizeTripData);
-    return parsed;
-  } catch {
-    return { trips: {} };
-  }
-}
+let activeChannel = null;
 
 function loadSession() {
   const saved = localStorage.getItem(SESSION_KEY);
@@ -51,17 +46,96 @@ function loadSession() {
   }
 }
 
-function saveStore() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-}
-
 function saveSession() {
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 
-function route() {
+// Load a single trip by code into the cache. Returns the trip or null.
+async function fetchTrip(code) {
+  const { data, error } = await sb
+    .from("trips")
+    .select("data")
+    .eq("code", code)
+    .maybeSingle();
+  if (error) {
+    showToast("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+    return store.trips[code] || null;
+  }
+  if (!data) return null;
+  store.trips[code] = normalizeTripData(data.data);
+  return store.trips[code];
+}
+
+// Load every trip this device belongs to (the codes saved in `session`).
+async function fetchMyTrips() {
+  const codes = Object.keys(session);
+  if (!codes.length) {
+    store.trips = {};
+    return;
+  }
+  const { data, error } = await sb.from("trips").select("code,data").in("code", codes);
+  if (error) {
+    showToast("โหลดทริปไม่สำเร็จ");
+    return;
+  }
+  store.trips = {};
+  data.forEach((row) => {
+    store.trips[row.code] = normalizeTripData(row.data);
+  });
+}
+
+// Upsert one trip's full state to the cloud (last write wins).
+async function saveTrip(trip) {
+  store.trips[trip.code] = trip;
+  const { error } = await sb.from("trips").upsert({ code: trip.code, data: trip });
+  if (error) showToast("บันทึกขึ้นคลาวด์ไม่สำเร็จ");
+}
+
+// Subscribe to live changes for one trip; pass null to stop watching.
+function watchTrip(code) {
+  if (activeChannel) {
+    sb.removeChannel(activeChannel);
+    activeChannel = null;
+  }
+  if (!code) return;
+  activeChannel = sb
+    .channel(`trip-${code}`)
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "trips", filter: `code=eq.${code}` },
+      (payload) => onTripChange(code, payload),
+    )
+    .subscribe();
+}
+
+function onTripChange(code, payload) {
+  const params = new URLSearchParams(location.search);
+  if (params.get("trip") !== code) return;
+
+  if (payload.eventType === "DELETE") {
+    delete store.trips[code];
+    history.pushState(null, "", location.pathname);
+    renderStart();
+    showToast("ทริปนี้ถูกลบแล้ว");
+    return;
+  }
+
+  store.trips[code] = normalizeTripData(payload.new.data);
+  const access = getTripAccess(store.trips[code]);
+  if (access.type !== "member") {
+    route();
+    return;
+  }
+  // Don't yank the UI out from under someone who is mid-typing.
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+  renderDashboard(store.trips[code]);
+}
+
+async function route() {
   const params = new URLSearchParams(window.location.search);
   const tripCode = normalizeCode(params.get("trip") || "");
+  if (tripCode) await fetchTrip(tripCode);
   const currentTrip = tripCode ? store.trips[tripCode] : null;
   const access = currentTrip ? getTripAccess(currentTrip) : { type: "none" };
 
@@ -88,7 +162,9 @@ function route() {
   renderStart();
 }
 
-function renderStart() {
+async function renderStart() {
+  watchTrip(null);
+  await fetchMyTrips();
   const recentTrips = getRecentTrips();
   app.className = "app-shell auth-shell";
   app.innerHTML = `
@@ -205,7 +281,7 @@ function renderCreateTrip() {
     seedExampleExpenses(trip, ownerId);
     store.trips[code] = trip;
     session[code] = ownerId;
-    saveStore();
+    saveTrip(trip);
     saveSession();
     history.pushState(null, "", `?trip=${code}`);
     renderInvite(trip);
@@ -229,12 +305,12 @@ function renderJoinByCode() {
   `;
 
   bindBackButtons();
-  document.querySelector("#codeForm").addEventListener("submit", (event) => {
+  document.querySelector("#codeForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const code = normalizeCode(document.querySelector("#tripCodeInput").value);
-    const trip = store.trips[code];
+    const trip = await fetchTrip(code);
     if (!trip) {
-      showToast("ยังไม่พบทริปนี้บนเครื่องนี้");
+      showToast("ไม่พบทริปนี้");
       return;
     }
     history.pushState(null, "", `?trip=${code}`);
@@ -271,13 +347,14 @@ function renderJoin(trip) {
     };
     trip.joinRequests.push(request);
     session[trip.code] = `request:${request.id}`;
-    saveStore();
+    saveTrip(trip);
     saveSession();
     renderPending(trip, request);
   });
 }
 
 function renderPending(trip, request) {
+  watchTrip(trip.code);
   app.className = "app-shell auth-shell";
   app.innerHTML = `
     <section class="auth-card">
@@ -345,6 +422,7 @@ function renderInvite(trip) {
 }
 
 function renderDashboard(trip) {
+  watchTrip(trip.code);
   app.className = "app-shell";
   const totals = getTotals(trip);
   const settlements = getSettlements(trip);
@@ -527,7 +605,7 @@ function bindDashboard(trip) {
       category: document.querySelector("#expenseCategory").value,
       createdAt: new Date().toISOString(),
     });
-    saveStore();
+    saveTrip(trip);
     renderDashboard(trip);
   });
 }
@@ -616,7 +694,7 @@ function openTrip(code) {
   renderJoin(trip);
 }
 
-function deleteTrip(code) {
+async function deleteTrip(code) {
   const trip = store.trips[code];
   if (!trip) return;
 
@@ -625,8 +703,9 @@ function deleteTrip(code) {
 
   delete store.trips[code];
   delete session[code];
-  saveStore();
   saveSession();
+  const { error } = await sb.from("trips").delete().eq("code", code);
+  if (error) showToast("ลบบนคลาวด์ไม่สำเร็จ");
 
   if (new URLSearchParams(location.search).get("trip") === code) {
     history.pushState(null, "", location.pathname);
@@ -636,39 +715,58 @@ function deleteTrip(code) {
   showToast("ลบทริปแล้ว");
 }
 
-function changeCover(trip, file) {
+async function changeCover(trip, file) {
   if (!file) return;
   if (!file.type.startsWith("image/")) {
     showToast("เลือกไฟล์รูปภาพเท่านั้น");
     return;
   }
 
-  const reader = new FileReader();
-  reader.addEventListener("load", () => {
-    const image = new Image();
-    image.addEventListener("load", () => {
-      trip.coverImage = resizeCoverImage(image);
-      saveStore();
-      renderDashboard(trip);
-      showToast("เปลี่ยนภาพปกแล้ว");
-    });
-    image.addEventListener("error", () => showToast("อ่านรูปนี้ไม่ได้"));
-    image.src = reader.result;
-  });
-  reader.readAsDataURL(file);
+  showToast("กำลังอัปโหลดรูป…");
+  try {
+    const blob = await resizeCoverImage(file);
+    const path = `${trip.code}-${Date.now()}.jpg`;
+    const { error } = await sb.storage
+      .from("covers")
+      .upload(path, blob, { contentType: "image/jpeg", upsert: true });
+    if (error) throw error;
+    const { data } = sb.storage.from("covers").getPublicUrl(path);
+    trip.coverImage = data.publicUrl;
+    await saveTrip(trip);
+    renderDashboard(trip);
+    showToast("เปลี่ยนภาพปกแล้ว");
+  } catch {
+    showToast("อัปโหลดรูปไม่สำเร็จ");
+  }
 }
 
-function resizeCoverImage(image) {
-  const maxWidth = 1600;
-  const scale = Math.min(1, maxWidth / image.naturalWidth);
-  const width = Math.round(image.naturalWidth * scale);
-  const height = Math.round(image.naturalHeight * scale);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d");
-  context.drawImage(image, 0, 0, width, height);
-  return canvas.toDataURL("image/jpeg", 0.86);
+// Read, downscale, and re-encode the chosen image into a JPEG Blob for upload.
+function resizeCoverImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () => reject(new Error("read")));
+    reader.addEventListener("load", () => {
+      const image = new Image();
+      image.addEventListener("error", () => reject(new Error("decode")));
+      image.addEventListener("load", () => {
+        const maxWidth = 1600;
+        const scale = Math.min(1, maxWidth / image.naturalWidth);
+        const width = Math.round(image.naturalWidth * scale);
+        const height = Math.round(image.naturalHeight * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error("encode"))),
+          "image/jpeg",
+          0.86,
+        );
+      });
+      image.src = reader.result;
+    });
+    reader.readAsDataURL(file);
+  });
 }
 
 function getCoverStyle(trip) {
@@ -685,7 +783,7 @@ function approveRequest(trip, requestId) {
   request.status = "approved";
   request.memberId = member.id;
   request.reviewedAt = new Date().toISOString();
-  saveStore();
+  saveTrip(trip);
   renderDashboard(trip);
   showToast(`อนุมัติ ${request.nickname} แล้ว`);
 }
@@ -696,7 +794,7 @@ function rejectRequest(trip, requestId) {
 
   request.status = "rejected";
   request.reviewedAt = new Date().toISOString();
-  saveStore();
+  saveTrip(trip);
   renderDashboard(trip);
   showToast(`ปฏิเสธ ${request.nickname} แล้ว`);
 }
@@ -714,7 +812,7 @@ function removeMember(trip, memberId) {
   trip.joinRequests.forEach((request) => {
     if (request.memberId === memberId) request.status = "removed";
   });
-  saveStore();
+  saveTrip(trip);
   renderDashboard(trip);
   showToast(`ลบ ${member.name} แล้ว`);
 }
@@ -845,7 +943,7 @@ function renderExpenses(trip) {
   document.querySelectorAll("[data-remove-expense]").forEach((button) => {
     button.addEventListener("click", () => {
       trip.expenses = trip.expenses.filter((expense) => expense.id !== button.dataset.removeExpense);
-      saveStore();
+      saveTrip(trip);
       renderDashboard(trip);
     });
   });
